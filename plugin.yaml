@@ -1,0 +1,8 @@
+name: retake
+version: 0.3.0
+requires_hermes: ">=0.23.1"
+description: Explicit local media review, immutable takes, annotations, revision briefs and explicit opt-in still-image generation run from the Retake page through Hermes's configured image_generate (stock tool server, no chat; /retake-generate remains a manual fallback). Provider account may be charged; cost unknown
+api_version: 1
+license: MIT
+provides_tools: []
+provides_hooks: []
