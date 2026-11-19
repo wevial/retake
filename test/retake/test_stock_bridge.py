@@ -198,6 +198,10 @@ class Bridge(unittest.TestCase):
             ({'success': False, 'image': None, 'error': f'401 Unauthorized {leak}', 'error_type': 'auth_required'}, 'unknown', 'tool_error', 'signin'),
             ({'success': False, 'image': None, 'error': f'Insufficient credits (402) {leak}', 'error_type': 'provider_exception'}, 'unknown', 'tool_error', 'credits'),
             ({'success': False, 'image': None, 'error': f'rate limit 429 {leak}', 'error_type': 'api_error'}, 'unknown', 'tool_error', 'quota'),
+            # A validation error that echoes the request must not read as credits (rendering_speed='BALANCED').
+            ({'success': False, 'image': None, 'error': "{'detail': [{'type': 'missing', 'loc': ['body', 'image_url'], 'msg': 'Field required', 'input': {'prompt': 'subscription balance, insufficient light, blocked road', 'rendering_speed': 'BALANCED'}}]}", 'error_type': 'provider_exception'}, 'unknown', 'tool_error', 'invalid'),
+            ({'success': False, 'image': None, 'error': 'User is locked. Reason: Exhausted balance. Top up your balance.', 'error_type': 'provider_exception'}, 'unknown', 'tool_error', 'credits'),
+            ({'success': False, 'image': None, 'error': "Internal error; prompt='a subscription balance sheet, payment terminal, content blocked'", 'error_type': 'provider_exception'}, 'unknown', 'tool_error', 'other'),
             ({'success': False, 'image': None, 'error': 'Image generation is unavailable in this environment.\nFAL_KEY ...', 'error_type': 'ValueError'}, 'unknown', 'tool_error', 'signin'),
             ({'success': False, 'image': None, 'error': f"Provider 'x' does not support image-to-image {leak}", 'error_type': 'modality_unsupported'}, 'unknown', 'tool_error', 'unsupported'),
             ({'error': f'Unknown tool: image_generate {leak}'}, 'unknown', 'tool_error', 'unsupported'),

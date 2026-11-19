@@ -5,7 +5,8 @@ codex-app-server-runtime.md, "Hermes tool callback") as a stdio MCP server that 
 from its environment, runs Hermes's own builtin-tool and plugin discovery for that home and dispatches
 through the same `handle_function_call` path as a chat turn. No session, Agent or chat is created.
 
-Retake spawns it per run for the REQUESTING profile's home only, reads the advertised `image_generate`
+Retake spawns it per run for the REQUESTING profile's home only (minimal env plus only that profile's
+own secrets, see `server_env`), reads the advertised `image_generate`
 schema (a revision needs `image_url`), and makes exactly one `call_tool`. Everything before that call
 raises `NotSent` (certainly nothing reached a provider); anything after it is recorded as may-have-run.
 No retry and no config write. An attempt that snapshotted a per-request image model (image_selection.py)
@@ -34,12 +35,42 @@ def hermes_source():
     return str(Path(hermes_constants.__file__).resolve().parent)
 
 
-def server_env(home):
-    env = dict(os.environ)
+ENV_ALLOW = ('PATH', 'HOME', 'LANG', 'TMPDIR')
+# Certificate-bundle PATHS only (no secrets): keeps HTTPS working where the host trusts a custom CA.
+# Proxy variables stay out: their URLs can carry credentials.
+ENV_ALLOW_CA = ('SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+ENV_ALLOW_WINDOWS = ('SYSTEMROOT', 'TEMP', 'TMP', 'USERPROFILE')
+SCRATCH_TMP = ('TMPDIR', 'TMP', 'TEMP')
+
+
+def minimal_env():
+    """Allowlisted, credential-free base. Never a copy of the backend environment: a backend serving
+    several profiles carries the launch profile's keys."""
+    allow = ENV_ALLOW + ENV_ALLOW_CA + (ENV_ALLOW_WINDOWS if os.name == 'nt' else ())
+    env = {k: v for k, v in os.environ.items() if k.upper() in allow or k.upper().startswith('LC_')}
+    # Hermes exports TMPDIR as the LAUNCH profile's scratch dir; drop that so the child derives its own.
+    scratch = os.environ.get('HERMES_SCRATCH_DIR')
+    for k in [k for k in env if k.upper() in SCRATCH_TMP and scratch and env[k] == scratch]:
+        del env[k]
+    return env
+
+
+def server_env(home, credentials=False):
+    """(env, src) for a child bound to `home`: the allowlist plus HERMES_HOME, HERMES_QUIET, PYTHONPATH.
+    `credentials` (the tool server only) adds ONLY `home`'s own secrets (its `.env` + secret sources)
+    through stock `served_profile_child_env`; if that is unavailable or fails, NotSent before any spawn."""
+    env = minimal_env()
+    if credentials:
+        try:
+            from tools.environments.local import served_profile_child_env
+            env = served_profile_child_env(base=env, target_home=str(home), inherit_credentials=True)
+        except Exception:
+            log.debug('Retake: no profile-scoped child env', exc_info=True)
+            raise NotSent('tool_unavailable') from None
     env['HERMES_HOME'] = str(home)
     env['HERMES_QUIET'] = '1'
     src = hermes_source()
-    env['PYTHONPATH'] = os.pathsep.join([src] + [p for p in env.get('PYTHONPATH', '').split(os.pathsep) if p and p != src])
+    env['PYTHONPATH'] = os.pathsep.join([src] + [p for p in os.environ.get('PYTHONPATH', '').split(os.pathsep) if p and p != src])
     return env, src
 
 
@@ -51,7 +82,7 @@ def mcp_dispatch(home, args, selection=None):
         from mcp.client.stdio import stdio_client
     except ImportError:
         raise NotSent('tool_unavailable')
-    env, src = server_env(home)
+    env, src = server_env(home, credentials=True)
     pin = ['--image-selection', selection] if selection else []
     params = StdioServerParameters(command=sys.executable, args=['-m', SERVER_MODULE, *pin], env=env, cwd=src)
     sent = False

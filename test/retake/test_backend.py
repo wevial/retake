@@ -57,6 +57,23 @@ class RetakeTest(unittest.TestCase):
             r=await c.post(path+'/briefs',json={'change':'Move caption','preserve':'Palette'}); self.assertEqual(r.status_code,200,r.text)
             brief=r.json(); self.assertTrue(brief['draft_only']); self.assertEqual(brief['annotations'][0]['id'],ann['id'])
             self.assertEqual((await c.get(f'/projects/{pid}/briefs/{brief["id"]}')).json(),brief)
+            # Editing a note rewrites its text in place (same id, kind, region, order); the saved request keeps its snapshot.
+            ann2=(await c.post(path+'/annotations',json={'kind':'region','note':'Second','region':{'x':.5,'y':.5,'width':.2,'height':.2}})).json()
+            r=await c.patch(path+f'/annotations/{ann["id"]}',json={'note':'  Move caption left  '}); self.assertEqual(r.status_code,200,r.text)
+            self.assertEqual(r.json(),{**ann,'note':'Move caption left'})
+            for bad in ({'note':'   '},{'note':''},{'note':5},{},{'note':'x'*4001}):
+                self.assertEqual((await c.patch(path+f'/annotations/{ann["id"]}',json=bad)).status_code,422,bad)
+            self.assertEqual((await c.patch(path+'/annotations/'+'0'*32,json={'note':'x'})).status_code,404)
+            self.assertEqual((await c.patch(f'/projects/{pid}/versions/{b["id"]}/annotations/{ann["id"]}',json={'note':'x'})).status_code,404)
+            self.assertEqual([(x['id'],x['note']) for x in (await c.get(f'/projects/{pid}')).json()['annotations']],[(ann['id'],'Move caption left'),(ann2['id'],'Second')])
+            self.assertEqual((await c.get(f'/projects/{pid}/briefs/{brief["id"]}')).json(),brief)
+            self.assertEqual((await c.delete(path+f'/annotations/{ann2["id"]}')).json(),{'removed':ann2['id']})
+            # Removing a note leaves the saved request's own snapshot untouched; wrong version or a repeat is 404.
+            self.assertEqual((await c.delete(f'/projects/{pid}/versions/{b["id"]}/annotations/{ann["id"]}')).status_code,404)
+            self.assertEqual((await c.delete(path+f'/annotations/{ann["id"]}')).json(),{'removed':ann['id']})
+            self.assertEqual((await c.delete(path+f'/annotations/{ann["id"]}')).status_code,404)
+            self.assertEqual((await c.get(f'/projects/{pid}')).json()['annotations'],[])
+            self.assertEqual((await c.get(f'/projects/{pid}/briefs/{brief["id"]}')).json(),brief)
             board=(await c.get(f'/projects/{pid}')).json(); self.assertEqual(len(board['versions']),2); self.assertEqual(board['versions'][0]['status'],'rejected')
             media=(await c.get(path+'/media')).json(); self.assertEqual(base64.b64decode(media['base64']),self.png)
             self.assertNotIn(str(self.home),str(board)+str(media))
@@ -272,12 +289,40 @@ class RetakeTest(unittest.TestCase):
             up = lambda q='': c.post(f'/projects/{pid}/versions{q}', files={'file': ('t.png', self.png, 'image/png')})
             a = (await up()).json(); b = (await up(f'?parent_id={a["id"]}')).json(); c3 = (await up(f'?parent_id={b["id"]}')).json(); other = (await up()).json()
             review = lambda v, s: c.post(f'/projects/{pid}/versions/{v["id"]}/review', json={'status': s})
+            self.assertEqual(a['reviewed'], False, 'a new version is unreviewed (no pill) though it reads as needs_revision')
+            self.assertEqual({(v['status'], v['reviewed']) for v in (await c.get(f'/projects/{pid}')).json()['versions']}, {('needs_revision', False)})
             await review(c3, 'rejected'); await review(other, 'selected')
             self.assertEqual((await review(a, 'selected')).json()['unapproved'], [])
             r = (await review(b, 'selected')).json(); self.assertEqual(r['unapproved'], [a['id']])
             st = {v['id']: v['status'] for v in (await c.get(f'/projects/{pid}')).json()['versions']}
+            seen = {v['id']: v['reviewed'] for v in (await c.get(f'/projects/{pid}')).json()['versions']}
+            self.assertEqual([seen[a['id']], seen[b['id']], seen[c3['id']], seen[other['id']]], [True, True, True, True], 'any review row counts as reviewed, including an un-pick')
+            self.assertEqual(r['reviewed'], True)
             self.assertEqual([st[a['id']], st[b['id']], st[c3['id']], st[other['id']]], ['needs_revision', 'selected', 'rejected', 'selected'], 'one pick per asset; rejected and other assets untouched')
             self.assertEqual((await review(b, 'needs_revision')).json()['unapproved'], [], 'un-approving moves nothing')
+        self.run_async(flow)
+
+    def test_main_hidden_none_map_onto_stored_review_values(self):
+        async def flow(c):
+            pid = (await c.post('/projects', json={'name': 'Marks'})).json()['id']
+            up = lambda q='': c.post(f'/projects/{pid}/versions{q}', files={'file': ('t.png', self.png, 'image/png')})
+            a = (await up()).json(); b = (await up(f'?parent_id={a["id"]}')).json(); c3 = (await up(f'?parent_id={b["id"]}')).json()
+            self.assertIsNone(a['mark'], 'a new version has no mark')
+            review = lambda v, s: c.post(f'/projects/{pid}/versions/{v["id"]}/review', json={'status': s})
+            board = lambda: c.get(f'/projects/{pid}')
+            # Old values keep working and read back with their mark: selected = main, rejected = hidden, needs_revision = none.
+            await review(a, 'selected'); await review(b, 'needs_revision'); await review(c3, 'rejected')
+            marks = lambda vs: [(v['status'], v['mark']) for v in vs]
+            self.assertEqual(marks((await board()).json()['versions']), [('selected', 'main'), ('needs_revision', None), ('rejected', 'hidden')])
+            # New values store the same rows; Main stays one per asset.
+            r = (await review(b, 'main')).json(); self.assertEqual((r['status'], r['mark'], r['unapproved']), ('selected', 'main', [a['id']]))
+            self.assertEqual(marks((await board()).json()['versions']), [('needs_revision', None), ('selected', 'main'), ('rejected', 'hidden')])
+            self.assertEqual((await review(b, 'none')).json()['mark'], None, 'Main can be unset')
+            self.assertEqual((await review(c3, 'none')).json()['status'], 'needs_revision', 'unhide')
+            self.assertEqual((await review(a, 'hidden')).json()['status'], 'rejected')
+            import sqlite3; con = sqlite3.connect(self.scope/'plugin-data'/'retake'/'retake.sqlite3'); rows = con.execute('SELECT version_id,status FROM reviews').fetchall(); con.close()
+            self.assertEqual(sorted(rows), sorted([(a['id'], 'rejected'), (b['id'], 'needs_revision'), (c3['id'], 'needs_revision')]), 'only the stored names reach the table')
+            for bad in ('Main', 'approved', 'unreviewed', '', None): self.assertEqual((await review(a, bad)).status_code, 422)
         self.run_async(flow)
 
     def test_asset_rename_is_a_display_name_only(self):

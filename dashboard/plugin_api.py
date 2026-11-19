@@ -103,12 +103,19 @@ def project(con, pid):
     if not row: fail(404,'Project not found')
     return json.loads(row[0])
 
+# Review marks. Stored values are unchanged: 'selected' is the asset's Main, 'rejected' is Hidden, and
+# 'needs_revision' (or no review row) is no mark. The endpoint takes main / hidden / none, and the stored names.
+REVIEW_STATES={'main':'selected','hidden':'rejected','none':'needs_revision','selected':'selected','rejected':'rejected','needs_revision':'needs_revision'}
+MARK_OF={'selected':'main','rejected':'hidden'}
+
 def version(con, pid, vid):
     project(con,pid); ident(vid)
     row=con.execute('SELECT data FROM versions WHERE project_id=? AND id=?',(pid,vid)).fetchone()
     if not row: fail(404,'Version not found in project')
     v=json.loads(row[0]); state=con.execute('SELECT status FROM reviews WHERE version_id=?',(vid,)).fetchone()
     v['status']=state[0] if state else 'needs_revision'
+    v['reviewed']=state is not None
+    v['mark']=MARK_OF.get(v['status'])
     return v
 
 def annotations(con, vid):
@@ -364,7 +371,7 @@ async def upload_version(pid:str,request:Request,parent_id:str|None=None):
         if con.execute('SELECT coalesce(sum(length(media)),0) FROM versions').fetchone()[0]+len(data)>MAX_PROFILE_BYTES: fail(413,'Profile media quota reached')
         v=record(project_id=pid,asset_id=parent['asset_id'] if parent else uuid.uuid4().hex,parent_id=parent_id,name=name,mime=mime,size=len(data),sha256=hashlib.sha256(data).hexdigest(),**meta)
         con.execute('INSERT INTO versions VALUES (?,?,?,?)',(v['id'],pid,json.dumps(v),data))
-    return {**v,'status':'needs_revision'}
+    return {**v,'status':'needs_revision','reviewed':False,'mark':None}
 
 @router.get('/projects/{pid}/versions/{vid}/media')
 async def read_media(pid:str,vid:str):
@@ -389,17 +396,18 @@ async def read_thumbnail(pid:str,vid:str):
 @router.post('/projects/{pid}/versions/{vid}/review')
 async def review(pid:str,vid:str,body:dict):
     status=body.get('status')
-    if not isinstance(status,str) or status not in {'selected','needs_revision','rejected'}: fail(422,'Invalid review state')
+    if not isinstance(status,str) or status not in REVIEW_STATES: fail(422,'Invalid review state')
+    status=REVIEW_STATES[status]
     with db() as con:
         con.execute('BEGIN IMMEDIATE'); v=version(con,pid,vid)
-        # Approval is the asset's ONE pick: approving this version returns any other approved version of the
-        # same asset to needs_revision, in the same transaction. Nothing is hidden or deleted.
+        # Main is ONE per asset: making this version Main returns any other Main of the same asset to no mark,
+        # in the same transaction. Nothing is deleted.
         unapproved=[]
         if status=='selected':
             unapproved=[r[0] for r in con.execute("SELECT r.version_id FROM reviews r JOIN versions x ON x.id=r.version_id WHERE x.project_id=? AND json_extract(x.data,'$.asset_id')=? AND r.version_id!=? AND r.status='selected' ORDER BY x.rowid",(pid,v['asset_id'],vid))]
             con.executemany("UPDATE reviews SET status='needs_revision' WHERE version_id=?",[(x,) for x in unapproved])
         con.execute('INSERT INTO reviews VALUES (?,?) ON CONFLICT(version_id) DO UPDATE SET status=excluded.status',(vid,status))
-    return {**v,'status':status,'unapproved':unapproved}
+    return {**v,'status':status,'reviewed':True,'mark':MARK_OF.get(status),'unapproved':unapproved}
 
 @router.post('/projects/{pid}/versions/{vid}/annotations')
 async def annotate(pid:str,vid:str,body:dict):
@@ -421,6 +429,28 @@ async def annotate(pid:str,vid:str,body:dict):
         if len(annotations(con,vid))>=MAX_NOTES: fail(409,'Annotation limit reached')
         con.execute('INSERT INTO annotations VALUES (?,?,?)',(a['id'],vid,json.dumps(a)))
     return a
+
+@router.patch('/projects/{pid}/versions/{vid}/annotations/{aid}')
+async def edit_annotation(pid:str,vid:str,aid:str,body:dict):
+    """Rewrites one saved note's text in place. Region/timestamp, kind, id and order are unchanged;
+    saved requests and attempts keep their own snapshots."""
+    note=text(body.get('note'),'Annotation')
+    with db() as con:
+        con.execute('BEGIN IMMEDIATE'); version(con,pid,vid)
+        row=con.execute('SELECT data FROM annotations WHERE id=? AND version_id=?',(aid,vid)).fetchone()
+        if not row: fail(404,'Note not found')
+        a={**json.loads(row[0]),'note':note}
+        con.execute('UPDATE annotations SET data=? WHERE id=? AND version_id=?',(json.dumps(a),aid,vid))
+    return a
+
+@router.delete('/projects/{pid}/versions/{vid}/annotations/{aid}')
+async def remove_annotation(pid:str,vid:str,aid:str):
+    """Removes one saved note from the version. Saved requests and generation attempts keep their own
+    snapshot of the notes they were made from, so history is unchanged."""
+    with db() as con:
+        con.execute('BEGIN IMMEDIATE'); version(con,pid,vid)
+        if not con.execute('DELETE FROM annotations WHERE id=? AND version_id=?',(aid,vid)).rowcount: fail(404,'Note not found')
+    return {'removed':aid}
 
 @router.post('/projects/{pid}/versions/{vid}/briefs')
 async def create_brief(pid:str,vid:str,body:dict):

@@ -217,6 +217,11 @@ class OutputReader(unittest.TestCase):
                     'cache/generated/images/ok.png', str(outside), str(d / '..' / 'images' / 'ok.png'), str(link), str(d / 'text.png'), str(d / 'missing.png'), '', None, 42]:
             with self.assertRaises(Rejected, msg=bad): read(bad, home)
         with self.assertRaises(Rejected): read(str(good), home, limit=10)
+        def reason(v):
+            try: read(v, home)
+            except Rejected as e: return str(e)
+        self.assertEqual(reason('data:image/png;base64,' + 'A' * 5000), 'url', 'a long inline image is a URL, not missing')
+        self.assertEqual(reason('/' + 'a' * 5000), 'path')
         other = self.home / 'other'; other_images = self.images(other); (other_images / 'x.png').write_bytes(self.png)
         home2 = self.home / 'profile2'; (home2 / 'cache' / 'generated').mkdir(parents=True); (home2 / 'cache' / 'generated' / 'images').symlink_to(other_images)
         with self.assertRaises(Rejected): read(str(home2 / 'cache' / 'generated' / 'images' / 'x.png'), home2)

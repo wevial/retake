@@ -18,6 +18,9 @@ import time
 
 from . import direct_runner
 
+# Listed edit-capable models Retake never sends as a revision: Hermes core sends this one the wrong edit parameter, so every
+# revision fails. Still listed and usable for new assets. Matched on the bare model id, whatever provider lists it.
+REVISION_UNSUPPORTED_MODELS = frozenset({'fal-ai/ideogram/v3'})
 SELECTION_ID = re.compile(r'^(openai-codex|nous):[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$')
 ROUTES = {'openai-codex': {'chatgpt'}, 'nous': {'nous-fal', 'nous-krea'}}
 BILLING = {'openai-codex': 'subscription:chatgpt', 'nous': 'subscription:nous'}
@@ -44,8 +47,9 @@ def clean(d):
             'route': d['route'], 'billing': d['billing'], 'entitlement': 'unknown', 'available': available,
             'unavailable_reason': _text(d.get('unavailable_reason'), 200) if available is False else None,
             'image_input': caps.get('image_input') if caps.get('image_input') in ('edit', 'style') else None,
-            # Revisions send the exact parent as an edit reference: only an explicit edit model qualifies.
-            'revision': caps.get('revision') is True and caps.get('edit') is True and caps.get('image_input') == 'edit',
+            # Revisions send the exact parent as an edit reference: only an explicit edit model qualifies, minus the unsupported ones.
+            'revision': caps.get('revision') is True and caps.get('edit') is True and caps.get('image_input') == 'edit'
+                        and d.get('model') not in REVISION_UNSUPPORTED_MODELS,
             'variant_enforced': d.get('variant_enforced') is True}
 
 

@@ -150,14 +150,24 @@ def _fetcher():
     from . import direct_runner
     return direct_runner.fetch_result_url if direct_runner.can_fetch_result_urls() else None
 
+def importable_success(a, result, meta):
+    """A reported success with a known modality; a revision must also report editing the reference.
+    Stock's `modality` is the INPUT kind: 'text' = text-to-image, 'image' = edited a reference."""
+    if result.get('success') is not True: return False
+    return not (meta['modality'] != 'image' and (a.get('kind') == 'revision' or meta['modality'] != 'text'))
+
 def fetchable_url(a, result, meta):
     """Some image backends (FAL, incl. managed Nous) succeed with a bare provider URL instead of a
-    cache path. Only a reported success with a known modality and a gated HTTPS URL qualifies; a
-    revision must also report editing the reference. Everything else keeps the plain `url` refusal.
-    Stock's `modality` is the INPUT kind: 'text' = text-to-image, 'image' = edited a reference."""
-    if result.get('success') is not True: return None
-    if meta['modality'] != 'image' and (a.get('kind') == 'revision' or meta['modality'] != 'text'): return None
-    return store.result_url(result.get('image'))
+    cache path. Only a qualifying success with a gated HTTPS URL is fetched; everything else keeps the
+    plain `url` refusal."""
+    return store.result_url(result.get('image')) if importable_success(a, result, meta) else None
+
+def inline_image(a, result, meta):
+    """Some models (FAL sync_mode, e.g. FLUX 2 Pro) succeed with the image inline as a data URI, which
+    Hermes cannot cache. Only a qualifying success whose value looks like an image data URI is decoded."""
+    image = result.get('image')
+    if not importable_success(a, result, meta) or not isinstance(image, str): return None
+    return image if store.INLINE_IMAGE.match(image) else None
 
 def store_output(root, home, a, result):
     aid = a['id']
@@ -173,8 +183,9 @@ def store_output(root, home, a, result):
         except Exception:
             log.debug('Retake: downloading the generated image failed')
             return finish(root, aid, 'failed', store.error_info('output_fetch_failed'), **meta)
+    inline = None if url else inline_image(a, result, meta)
     try:
-        data, mime = store.read_generated_output(image, home)
+        data, mime = store.decode_inline_output(inline) if inline else store.read_generated_output(image, home)
         dims = store.raster_metadata(data, mime)
     except (store.OutputRejected, ValueError) as e:
         reason = str(e) if isinstance(e, store.OutputRejected) else 'format'

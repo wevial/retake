@@ -15,6 +15,7 @@ import test_direct_run as direct
 
 CORE = json.loads((Path(__file__).with_name('image_selections_core_9a84eb772e.json')).read_text())
 NANO = 'nous:fal-ai/nano-banana-pro'       # edit-capable, available unknown (null)
+IDEO = 'nous:fal-ai/ideogram/v3'           # edit-capable in the listing, but never a revision (REVISION_UNSUPPORTED_MODELS)
 KREA_STYLE = 'nous:krea-2-medium'          # style reference only: never a revision
 TEXT_ONLY = 'nous:fal-ai/z-image/turbo'    # no image input
 CODEX = 'openai-codex:gpt-image-2-high'    # not signed in -> available false
@@ -128,6 +129,36 @@ class ImageSelection(unittest.TestCase):
             await c.post(f'/projects/{pid}/generations/{a["id"]}/run'); done = await self.settle(c, pid, a['id'])
             self.assertEqual(done['state'], 'succeeded', done)
             self.assertIn('image_url', self.calls[0]['args']); self.assertEqual(self.calls[0]['selection'], NANO)
+        self.run_async(flow)
+
+    def test_revision_exclusion_list_is_exact_and_applied_by_the_listing(self):
+        sel = self.api.image_selection
+        self.assertEqual(sel.REVISION_UNSUPPORTED_MODELS, frozenset({'fal-ai/ideogram/v3'}))
+        by = {d['id']: sel.clean(d) for d in CORE['selections']}
+        self.assertEqual((by[IDEO]['revision'], by[IDEO]['image_input'], by[IDEO]['available']), (False, 'edit', None))
+        self.assertIs(by[NANO]['revision'], True)
+        # Only the listed model is dropped: every other edit-capable descriptor keeps its own revision flag.
+        for d in CORE['selections']:
+            caps = d['capabilities']
+            qualifies = caps.get('revision') is True and caps.get('edit') is True and caps.get('image_input') == 'edit'
+            self.assertIs(by[d['id']]['revision'], qualifies and d['model'] != 'fal-ai/ideogram/v3', d['id'])
+        # An alias with the same model id under another listed provider is dropped too.
+        alias = dict(CORE['selections'][0], id='openai-codex:fal-ai/ideogram/v3', provider='openai-codex', model='fal-ai/ideogram/v3', route='chatgpt', billing='subscription:chatgpt')
+        self.assertIs(sel.clean(alias)['revision'], False)
+
+    def test_ideogram_is_offered_for_new_assets_and_refused_for_revisions(self):
+        async def flow(c):
+            got = {d['id']: d for d in (await c.get('/image-selections')).json()['selections']}
+            self.assertEqual((got[IDEO]['revision'], got[IDEO]['available']), (False, None))
+            pid, v1, brief, _ = await self.revision_setup(c)
+            r = await c.post(f'/projects/{pid}/generations', json={'client_request_id': f'{40:032x}', 'confirmed': True, 'aspect_ratio': 'landscape', 'parent_id': v1['id'], 'brief_id': brief['id'], 'image_selection': IDEO})
+            self.assertEqual(r.status_code, 409, r.text); self.assertIn('cannot edit a reference image', r.text)
+            self.assertEqual(self.calls, [], 'refused before anything is sent')
+            a = await self.reserve(c, pid, 41, image_selection=IDEO)
+            self.assertEqual(a['image_selection']['id'], IDEO)
+            await c.post(f'/projects/{pid}/generations/{a["id"]}/run'); done = await self.settle(c, pid, a['id'])
+            self.assertEqual(done['state'], 'succeeded', done)
+            self.assertEqual([x['selection'] for x in self.calls], [IDEO])
         self.run_async(flow)
 
     def test_claim_time_recheck_fails_closed_with_nothing_sent(self):

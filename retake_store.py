@@ -5,6 +5,8 @@ Both halves resolve the SAME profile-local database through public `plugin_data_
 (the host binds the profile; see plugins/plugin_storage.py: dashboard and tools share it across
 processes). This module never resolves a profile itself and never talks to a provider.
 """
+import base64
+import binascii
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -80,6 +82,7 @@ ERRORS = {  # Fixed, sanitized wording. Raw tool text, URLs, paths and exception
 }
 CATEGORY = {  # Actionable, bounded guidance derived from the tool's error class; the raw text is never shown.
     'signin': 'Sign-in or an API key is missing or expired for the configured image provider. Fix it in Hermes (Capabilities → Tools → Image Generation), then start a new generation.',
+    'invalid': 'The provider rejected the request as invalid for this model (a model or Hermes setup problem, not your account). Try another model.',
     'credits': 'The configured image provider reported a billing or credits problem. Check that account, then start a new generation.',
     'quota': 'The configured image provider reported a rate limit or usage quota. Wait before starting a new generation.',
     'unsupported': 'Hermes’s configured image tool does not support this request (no image backend registered, tool not enabled, or no image-edit support).',
@@ -102,14 +105,52 @@ KNOWN_ERROR_TYPES = frozenset({'provider_not_registered', 'modality_unsupported'
     'ImageResolutionError', 'ValueError', 'api_error', 'provider_exception', 'timeout',
     'rate_limit', 'quota_exceeded', 'content_policy'})
 CATEGORY_RULES = (
-    ('signin', re.compile(r'auth_required|missing_api_key|sign[ -]?in|log ?in|unauthori[sz]ed|\b401\b|\b403\b|api[ _]?key|FAL_KEY|credential|token (?:expired|invalid)', re.I)),
-    ('credits', re.compile(r'credit|billing|payment|\b402\b|insufficient|balance|subscription', re.I)),
+    # Order matters: the first match wins. Patterns are precise phrases, never bare words, because
+    # provider errors often repeat the request (e.g. rendering_speed='BALANCED' once read as "balance").
+    ('content', re.compile(r'content[ _-]?policy|safety (?:checker|system|filter)|moderation|nsfw|\bblocked by\b', re.I)),
+    ('invalid', re.compile(r'invalid_argument|invalid_image_input|validation error|field required|value_error|type_error|unprocessable|bad request|\b(?:400|422)\b|missing required|[\'"]type[\'"]\s*:\s*[\'"]missing[\'"]', re.I)),
+    ('signin', re.compile(r'auth_required|missing_api_key|\b401\b|\b403\b|unauthori[sz]ed|forbidden|sign[ -]?in required|not (?:signed|logged) in|invalid (?:api[ _]?)?key|api[ _]?key (?:is )?(?:missing|invalid|not set|required)|FAL_KEY|credentials? (?:are |is )?(?:missing|invalid|not found|not configured|expired)|no credentials|token (?:expired|invalid)', re.I)),
+    ('credits', re.compile(r'\b402\b|payment required|insufficient (?:credits?|balance|funds)|not enough (?:credits?|balance|funds)|(?:credits?|balance) (?:are |is |has been )?(?:exhausted|depleted|too low)|exhausted balance|out of credits|no (?:remaining )?credits|billing_error|billing (?:error|issue|problem|required)|top up', re.I)),
     ('quota', re.compile(r'quota|rate[ _-]?limit|\b429\b|too many requests', re.I)),
     ('setup', re.compile(r'unavailable in this environment|not set up|no backend', re.I)),
     ('unsupported', re.compile(r'provider_not_registered|modality_unsupported|not capable|does not support|unsupported|not registered|unknown tool|no such tool|not enabled|not available', re.I)),
-    ('content', re.compile(r'safety|content policy|moderation|blocked', re.I)),
     ('interrupted', re.compile(r'interrupt', re.I)),
 )
+# Request fields a provider echoes back in its error. Their VALUES are the user's own input (prompt,
+# reference image, options), so they are cut before matching and can never steer the category.
+ECHO_KEYS = re.compile(r'''(['"]?)(?:input|prompt|negative_prompt|image_urls?|reference_image_urls|mask_(?:image_)?url|rendering_speed|style|seed|body)\1\s*[:=]\s*''', re.I)
+BARE_VALUE = re.compile(r'[^\s,;)}\]]*')
+
+def _value_end(s, j):
+    """End of one echoed value at s[j]: a quoted string, a balanced {...}/[...]/(...) or a bare token."""
+    if j >= len(s): return j
+    c = s[j]
+    if c in '\'"':
+        k = j + 1
+        while k < len(s) and s[k] != c: k += 2 if s[k] == '\\' else 1
+        return min(k + 1, len(s))
+    if c in '{[(':
+        depth, k, quote = 0, j, None
+        while k < len(s):
+            ch = s[k]
+            if quote:
+                if ch == '\\': k += 2; continue
+                if ch == quote: quote = None
+            elif ch in '\'"': quote = ch
+            elif ch in '{[(': depth += 1
+            elif ch in '}])':
+                depth -= 1
+                if depth == 0: return k + 1
+            k += 1
+        return len(s)
+    return BARE_VALUE.match(s, j).end()
+
+def drop_echoes(raw):
+    out, i = [], 0
+    while True:
+        m = ECHO_KEYS.search(raw, i)
+        if not m: out.append(raw[i:]); return ''.join(out)
+        out.append(raw[i:m.end()]); i = max(_value_end(raw, m.end()), m.end() + 1) if m.end() < len(raw) else len(raw)
 
 class UnsafeStorage(Exception):
     pass
@@ -177,8 +218,9 @@ def read_generated_output(value, home, limit=None):
     downloaded into that cache by the adapter (stock_bridge.store_output -> direct_runner.fetch_result_url)
     and then comes through here as a path like any other. Returns (bytes, mime)."""
     limit = MAX_IMAGE_BYTES if limit is None else limit
-    if not isinstance(value, str) or not value or len(value) > 4096 or '\x00' in value: raise OutputRejected('missing')
+    if not isinstance(value, str) or not value or '\x00' in value: raise OutputRejected('missing')
     if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*:', value): raise OutputRejected('url')
+    if len(value) > 4096: raise OutputRejected('path')
     path, base, home = Path(value), generated_images_dir(home), Path(home)
     if not path.is_absolute() or '..' in path.parts or path.parent != base: raise OutputRejected('path')
     real_home, real_base = os.path.realpath(home), os.path.realpath(base)
@@ -203,6 +245,25 @@ def read_generated_output(value, home, limit=None):
     mime = sniff_raster(data)
     if not mime: raise OutputRejected('format')
     return data, mime
+
+INLINE_IMAGE = re.compile(r'data:(image/(?:png|jpeg|webp));base64,', re.I)
+MAX_INLINE_CHARS = 64 + (MAX_IMAGE_BYTES + 2) // 3 * 4
+
+def decode_inline_output(value):
+    """An image a provider returned inline (FAL sync_mode) as a base64 data URI. Only a bounded
+    PNG/JPEG/WebP base64 URI whose bytes sniff as the declared raster is accepted; the caller still
+    runs raster_metadata. Never fetched, never written to disk, never stored. Returns (bytes, mime)."""
+    m = INLINE_IMAGE.match(value) if isinstance(value, str) else None
+    if not m: raise OutputRejected('url')
+    if len(value) > MAX_INLINE_CHARS: raise OutputRejected('size')
+    try:
+        data = base64.b64decode(value[m.end():], validate=True)
+    except (binascii.Error, ValueError):
+        raise OutputRejected('format')
+    if not data: raise OutputRejected('format')
+    if len(data) > MAX_IMAGE_BYTES: raise OutputRejected('size')
+    if sniff_raster(data) != m.group(1).lower(): raise OutputRejected('format')
+    return data, m.group(1).lower()
 
 def result_url(value):
     """The provider result URL Retake may download once, or None. HTTPS only, a host, no userinfo,
@@ -261,7 +322,7 @@ def classify_tool_error(result):
     error_type = result.get('error_type')
     error_type = error_type if isinstance(error_type, str) and error_type in KNOWN_ERROR_TYPES else ''
     raw = result.get('error') if isinstance(result.get('error'), str) else ''
-    raw = raw[:4096]
+    raw = drop_echoes(raw[:4096])
     category = next((name for name, rule in CATEGORY_RULES if rule.search(error_type) or rule.search(raw)), 'other')
     # The generic public tool result has no trustworthy submission/billing-stage field.
     # A provider's wording/class cannot establish that a request never reached it.

@@ -1,0 +1,6 @@
+{
+  "provenance": "Route-relevant projection of real stock `commands.catalog` answers at Hermes 2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19, with Retake enabled in a secondary profile and NOT in the launch profile. test/retake/stock_gateway/harness.py asserts the live stock answers equal these; test/retake/sdk-stub.mjs serves them to the real desktop/plugin.js.",
+  "launch_unbound": { "plugin_commands_is_object": true, "plugin_commands": {}, "plugin_discovery_error": "" },
+  "live_session": { "plugin_commands_is_object": true, "plugin_commands": { "retake-generate": "Run one image generation already reserved and confirmed on the Retake page" }, "plugin_discovery_error": "" },
+  "profile_scoped": { "plugin_commands_is_object": true, "plugin_commands": { "retake-generate": "Run one image generation already reserved and confirmed on the Retake page" }, "plugin_discovery_error": "" }
+}
