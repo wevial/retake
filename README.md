@@ -1,15 +1,15 @@
-# Retake 0.4.0
+# Retake 0.4.1
 
 **An image-generation workspace for Hermes Desktop: generate or upload an image, mark what should change, and make the next take without losing the original.**
 
-Retake keeps image work in one place. Start with a generated image or one you upload, draw numbered notes on the regions you want changed, write what should change and what must stay, confirm a reference-guided revision, then compare versions and download the one you want.
+Retake keeps image work in one place. Start with a generated image or one you upload, draw numbered notes on the regions you want changed, write what should change and what must stay, generate a reference-guided revision, then compare versions and download the one you want.
 
 ## From first image to next take
 
 1. **Start with an image.** Describe one and generate it through Hermes's configured image tool, or upload a PNG, JPEG or static WebP.
 2. **Point to the change.** Draw regions and add notes. Mark as many areas as the revision needs. Notes can be edited (**Save** / **Cancel**) or removed (with **Undo**).
-3. **Write the request.** Say what should change and what must stay. Saving notes or a request never starts a generation.
-4. **Review, then generate.** Confirm once; Retake sends the exact stored parent image as the reference and stores the result as a new linked version.
+3. **Write the request.** Say what should change and what must stay. Unsent text is kept per version when you leave Retake. Saving notes or a request never starts a generation.
+4. **Generate.** The model, the account it bills and the charge note sit next to **Generate revision**. One click saves the request and sends it once; Retake sends the exact stored parent image as the reference and stores the result as a new linked version.
 5. **Compare and keep.** Compare two versions side by side, follow an asset's history in **Lineage**, set one version per asset as **Main** (★), hide the ones you don't need, and download any of them. Originals are never rewritten; hidden versions are never deleted.
 
 Projects, assets and versions are shown as a hierarchy you can navigate, and no chat needs to be open: generation runs from the Retake page.
@@ -20,9 +20,17 @@ Projects, assets and versions are shown as a hierarchy you can navigate, and no 
 - **Not video generation.** Retake generates still images only, and this release offers still-image upload only.
 - **Not a model switcher on every Hermes.** A per-request model picker is optional and appears only when your Hermes exposes the image-selection listing. On stock Hermes v0.23.1 it is hidden and Retake uses your configured image tool.
 
-## Upgrading from 0.3.0
+## What changed in 0.4.1
 
-Existing **0.3.0 projects open unchanged** in 0.4.0. The SQLite schema and stored review values are unchanged; API changes are additive only. New features do not require changing existing projects.
+- **Generate revision sends from the request.** The separate confirm step is gone. Model, account (for example *Nous subscription*, or *Hermes configured provider* for the default) and "May be charged · cost unknown" are shown beside the button before you click. Opening the composer, changing the model or **Save for later** never sends anything; a double click still sends once.
+- **First generation in an empty project** shows its progress in the centre (and its failure, until dismissed) instead of the start screen, then opens the new image.
+- **Change / Keep text is kept** per version when you leave Retake or reload, until you save or generate the request. It is stored in Desktop's plugin storage on this computer, not in the project.
+- **Attempt panel**: clearer state, time, model and account, the do-not-resubmit status, then actions. A reservation the page is sending reads **Starting…** without Run / Cancel reservation, and is sent without waiting for the board to refresh.
+- **Version details** say "Not reported by Hermes" when the image tool did not report a provider or model (stock's FAL/Nous route does not).
+
+## Upgrading
+
+Existing **0.3.0 and 0.4.0 projects open unchanged** in 0.4.1. The SQLite schema, stored review values and API are unchanged from 0.4.0; 0.4.1 changes the Desktop page only. New features do not require changing existing projects.
 
 ## Requirements
 
@@ -68,7 +76,7 @@ Please read before generating.
 
 - **Storage.** Projects, images, notes, requests and generation records live in the plugin's data folder of the active Hermes profile (SQLite plus image bytes). With a remote Hermes backend that is the **server**, not necessarily your laptop. Quotas: 512 MiB of media per profile.
 - **What is sent.** A generation sends your prompt to the image provider configured in Hermes. A revision also sends the exact reference image and your saved change/preserve text and region notes.
-- **Cost.** Generations may use provider credits or a subscription allowance. Cost and the exact model variant can be unknown; Retake records what the tool reports and does not verify it. Retake asks you to confirm before sending and **never automatically resubmits**. If the outcome is uncertain after the call was made, it is shown as "may have been billed", not retried.
+- **Cost.** Generations may use provider credits or a subscription allowance. Cost and the exact model variant can be unknown; Retake records what the tool reports and does not verify it. Retake shows the model, its account and this charge note beside **Generate** before anything is sent, sends only on that explicit click, and **never automatically resubmits**. If the outcome is uncertain after the call was made, it is shown as "may have been billed", not retried.
 - **Credentials.** Retake asks for no keys and reads no credential files itself. Provider access stays in Hermes (see the tool server below).
 - **Processes started by Retake.** No child gets a copy of the backend's environment (in a backend serving several profiles that environment holds the launch profile's keys). Every child starts from an allowlist: `PATH`, `HOME`, `LANG`, `LC_*`, `TMPDIR`, the certificate-bundle paths `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` (paths only), and on Windows `SYSTEMROOT`, `TEMP`, `TMP`, `USERPROFILE`; then `HERMES_HOME` (the requesting profile), `HERMES_QUIET` and `PYTHONPATH` (the running Hermes source plus any host-supplied extra import paths). Launch/service proxy variables are not passed on (their URLs can hold credentials).
   - **Tool server**, once per confirmed generation: `python -m agent.transports.hermes_tools_mcp_server` for the requesting profile. On top of the allowlist it gets **only that profile's own secrets** (its `.env` and secret sources) through Hermes's own `served_profile_child_env`; never another profile's. If that helper is unavailable, the run stops with nothing sent. Keys that exist only in the backend's shell or service environment are not passed on: put what the provider needs in that profile's `.env`.
@@ -83,7 +91,9 @@ PNG, JPEG, static WebP up to 12 MiB / 24 MP; 100 projects, 200 versions per proj
 
 ## Testing status (what was and was not checked)
 
-This is the proposed public **0.4.0** release, not yet published. It is a backward-compatible feature update over public 0.3.0 and matches the tested c76be37 source version. The reviewed implementation, security fix and gallery are retained.
+**0.4.1 candidate (not published):** offline checks only. Python suite from this package layout against pristine Hermes v0.23.1: 103 tests, 1 optional skip, both real `served_profile_child_env` checks passed (backend and child-process code are unchanged from 0.4.0). Browser checks of the Desktop page with a synthetic SDK/REST fixture and a fake `image_generate` (including the real Python backend over HTTP): all passed. No provider calls, native Desktop or Mac run for 0.4.1 yet.
+
+The evidence below is for **0.4.0**. It was the proposed public 0.4.0 release at the time. It is a backward-compatible feature update over public 0.3.0 and matches the tested c76be37 source version. The reviewed implementation, security fix and gallery are retained.
 
 - Python verification against pristine Hermes v0.23.2 (`ae2a81ccc00e9b7c06301523e5bb09608397149c`): 103 tests run, successful with 1 optional image-selection wire test skipped. Both real `served_profile_child_env` checks passed, including target-profile secret isolation and certificate-path precedence. An additional offline negative canary verified that all three child sites do not spawn when environment construction refuses. The stock source inventory remained unchanged. Earlier v0.23.1 evidence (103 tests, 1 optional skip, both real-helper checks) is retained separately. No live provider calls were made by these automated checks.
 - The stock v0.23.2 validator and actual Desktop-loader check passed in separate retained compatibility evidence. Validator success includes the explicit rule-9 warning about importing `served_profile_child_env`, the helper requested by the catalog reviewer; this is not warning-free admission or a claim of native Linux acceptance.
