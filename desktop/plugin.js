@@ -913,17 +913,19 @@ const CAPS_FAILED = 'Couldn’t check generation'
 const MISMATCH = 'Hermes reported a different model or a fallback; not the model you chose.'
 // Only attempts that still need the user; a succeeded attempt's record lives in its version's details.
 const pendingAttempts = attempts => attempts.filter(a => a.state !== 'succeeded')
+// The reserved attempt this page is sending right now (`generating` = { cid, attemptId } of that request), by id or request id.
+const sendingNow = (a, generating) => a.state === 'reserved' && !!generating && ((!!generating.attemptId && a.id === generating.attemptId) || (!!generating.cid && a.client_request_id === generating.cid))
 
 // One attempt: state and time; the model asked for and the account it bills; the tool's own report when it gave one;
-// the do-not-resubmit status; then the actions, with the attempt id last. `starting`: this page is sending it right now.
-function AttemptList({ label, attempts, onCheck, onSend, onCancel, canSend, starting }) {
+// the do-not-resubmit status; then the actions, with the attempt id last. `generating`: what this page is sending now.
+function AttemptList({ label, attempts, onCheck, onSend, onCancel, canSend, generating }) {
   const pending = pendingAttempts(attempts)
   if (!pending.length) return null
   return el('div', { className: 'rt-gen' },
     el('h4', { className: 'rt-eyebrow' }, `Attempts · ${pending.length}`),
     el('ol', { className: 'rt-attempts', 'aria-label': label }, ...pending.slice(0, 8).map(a => {
       const open = ACTIVE_ATTEMPT(a.state) || a.state === 'unknown'
-      const sending = a.state === 'reserved' && !!starting
+      const sending = sendingNow(a, generating)
       const reserved = a.state === 'reserved' && !sending
       const reportedBy = reportedOf(a), sel = a.image_selection?.display ? a.image_selection : null
       const model = sel ? String(sel.display) : 'Hermes default'
@@ -977,7 +979,7 @@ function requestDrafts(ctx, profile) {
     set: (id, change, preserve) => {
       const v = all(), had = id in v
       if (!change.trim() && !preserve.trim()) { if (!had) return; delete v[id] }
-      else { if (had && v[id].change === change && v[id].preserve === preserve) return; v[id] = { change: change.slice(0, 4000), preserve: preserve.slice(0, 4000), at: Date.now() } }
+      else { if (had && v[id].change === change && v[id].preserve === preserve) return; v[id] = { change, preserve, at: Date.now() } }
       const keep = Object.entries(v).sort((x, y) => (y[1]?.at || 0) - (x[1]?.at || 0)).slice(0, DRAFT_MAX)
       writeStored(ctx, DRAFT_KEY(profile), Object.fromEntries(keep))
     } }
@@ -1080,7 +1082,7 @@ function NewAssetComposer({ gen, route, prompt, setPrompt, aspect, setAspect, pi
       el('span', { className: 'rt-compose-go' }, btn('Cancel', onClose),
         btn(['Generate', el('kbd', { key: 'k', className: 'rt-kbd-hint', 'aria-hidden': 'true' }, MAC ? '⌘↵' : 'Ctrl↵')], send, { variant: undefined, className: 'rt-primary', disabled: !can, 'aria-keyshortcuts': 'Meta+Enter Control+Enter' }))),
     blocked ? el('p', { className: 'rt-why', role: 'status' }, 'Another generation is reserved or running.') : chargeLine(gen, chosen),
-    h(AttemptList, { label: 'New-asset attempts', attempts, onCheck, onSend, onCancel, canSend: ready && !generating, starting: !!generating })))
+    h(AttemptList, { label: 'New-asset attempts', attempts, onCheck, onSend, onCancel, canSend: ready && !generating, generating })))
 }
 
 // Revision from an explicitly SAVED brief bound to this exact version. Unsaved text is never used: "Generate revision"
@@ -1694,10 +1696,12 @@ function Review({ scope, version, versions, assetLabel, ordinalOf = () => '', or
   useEffect(() => { drafts.current.set(version.id, { note, change, preserve, region, timestamp, aspect, model }) }, [note, change, preserve, region, timestamp, aspect, model])
   const forget = keys => { const d = drafts.current.get(version.id); if (d) for (const k of keys) d[k] = '' }
   // Unsent Change/Keep text is stored shortly after typing stops, and at once when this view closes or the page unloads.
+  // Only text typed in this view is written, so an untouched view never overwrites a draft saved elsewhere.
   const typed = useRef([change, preserve])
   typed.current = [change, preserve]
+  const edited = useRef(false)
   const keepTyped = useRef(null)
-  keepTyped.current = () => savedDrafts.set(version.id, ...typed.current)
+  keepTyped.current = () => { if (edited.current) savedDrafts.set(version.id, ...typed.current) }
   useEffect(() => { const t = setTimeout(() => keepTyped.current(), 400); return () => clearTimeout(t) }, [change, preserve])
   useEffect(() => { const flush = () => keepTyped.current(); window.addEventListener('pagehide', flush); return () => { window.removeEventListener('pagehide', flush); flush() } }, [])
   const shownRegion = inspected?.region || region
@@ -1882,7 +1886,7 @@ function Review({ scope, version, versions, assetLabel, ordinalOf = () => '', or
   const sel = chosenOf(picks, true, modelId) // style-only, text-only and unavailable models are never a revision
   const generateFrom = briefId => onGenerate({ kind: 'revision', parentId: version.id, briefId, aspect, selection: sel?.id || '' })
   const saveRequest = async generate => {
-    const b = await act({ path: `${base}/briefs`, body: requestBody, after: () => { forget(['change', 'preserve']); setChange(''); setPreserve(''); savedDrafts.set(version.id, '', ''); setBriefId('') } })
+    const b = await act({ path: `${base}/briefs`, body: requestBody, after: () => { forget(['change', 'preserve']); setChange(''); setPreserve(''); edited.current = false; savedDrafts.set(version.id, '', ''); setBriefId('') } })
     if (generate && typeof b?.id === 'string') generateFrom(b.id)
   }
   // Each box has a visible short label; its accessible name stays the question.
@@ -1900,8 +1904,8 @@ function Review({ scope, version, versions, assetLabel, ordinalOf = () => '', or
       ...marksGroup,
       el('div', { key: 'request', className: 'rt-request', role: 'group', 'aria-label': 'Revision request' },
         el('h5', { className: 'rt-eyebrow' }, 'Anything else'),
-        box('Change', 'What should change?', change, setChange, annotations.length ? 'Anything not marked on the image' : 'e.g. Make the umbrella red', annotations.length > 0),
-        box('Keep', 'What must stay?', preserve, setPreserve, 'e.g. The lighting and framing', true),
+        box('Change', 'What should change?', change, v => { edited.current = true; setChange(v) }, annotations.length ? 'Anything not marked on the image' : 'e.g. Make the umbrella red', annotations.length > 0),
+        box('Keep', 'What must stay?', preserve, v => { edited.current = true; setPreserve(v) }, 'e.g. The lighting and framing', true),
         !canGenerate ? el('p', { className: 'rt-muted', role: 'status' }, video ? 'Video versions can’t be generated; save the request and upload the revised file as the next version.' : gen.revisionReason || gen.reason || 'Automatic revision isn’t available here; save the request and upload the revised file as the next version.') : null,
         canGenerate ? h(AspectCards, { value: aspect, onChange: setAspect }) : null,
         canGenerate ? h(ModelChip, { picks, revision: true, value: modelId, recent, onChange: v => { setModel(v); pickModel(v) } }) : null,
@@ -1910,14 +1914,14 @@ function Review({ scope, version, versions, assetLabel, ordinalOf = () => '', or
           btn('Save for later', () => saveRequest(false), { disabled: busy || !requestReady }),
           canGenerate ? btn(mine ? 'Generating…' : 'Generate revision', () => saveRequest(true), { variant: undefined, className: 'rt-primary', title: genTitle, disabled: busy || blocked || !reviseReady || !requestReady }) : null))),
     pendingAttempts(revisionAttempts).length ? el('section', { key: 'attempts', className: 'rt-attempts-sec', 'aria-label': 'Revision attempts' },
-      h(AttemptList, { label: 'Revision attempts from this version', attempts: revisionAttempts, onCheck, onSend, onCancel, canSend: reviseReady && !generating, starting: !!generating })) : null,
+      h(AttemptList, { label: 'Revision attempts from this version', attempts: revisionAttempts, onCheck, onSend, onCancel, canSend: reviseReady && !generating, generating })) : null,
     briefs.length ? el('details', { key: 'earlier', className: 'rt-details rt-earlier' },
       el('summary', {}, `Earlier requests (${briefs.length})`),
       el('ul', { className: 'rt-drafts' }, ...briefs.map(b => el('li', { key: b.id },
         el('button', { type: 'button', className: 'rt-draft', 'aria-label': `Open request · ${b.change.slice(0, 55)}`, 'aria-pressed': briefId === b.id, onClick: () => setBriefId(briefId === b.id ? '' : b.id) }, el('span', { className: 'rt-trunc' }, b.change), when(b.created_at) ? el('span', { className: 'rt-muted' }, when(b.created_at)) : null),
         briefId === b.id ? el('div', { className: 'rt-earlier-open' }, opened, canGenerate ? el('div', { className: 'rt-earlier-gen' },
           el('p', { className: 'rt-muted' }, `${modelName(sel)} · ${aspectLabel(aspect)}`), beforeGenerate,
-          el('div', { className: 'rt-row rt-end' }, btn(mine ? 'Generating…' : 'Generate revision', () => generateFrom(b.id), { variant: undefined, title: genTitle, disabled: busy || blocked || !reviseReady, 'aria-label': `Generate revision from request · ${b.change.slice(0, 55)}` }))) : null) : null)))) : null
+          el('div', { className: 'rt-row rt-end' }, btn(mine ? 'Generating…' : 'Generate revision', () => generateFrom(b.id), { variant: undefined, title: genTitle, disabled: busy || blocked || !reviseReady || brief.data?.id !== b.id, 'aria-label': `Generate revision from request · ${b.change.slice(0, 55)}` }))) : null) : null)))) : null
   ]
 
   // The attempt that produced this version, if it was generated: its record lives here, not in the attempt lists.
@@ -2040,6 +2044,8 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
   // New assets sent from the composer, shown as cards in All assets until their attempt succeeds (then the
   // asset card takes over) or is dismissed: { key, projectId, title, cid, attemptId, error }.
   const [newRuns, setNewRuns] = useState([])
+  const firstSeen = useRef(new Set()) // new-asset attempts an empty project showed in its centre; a failure stays there until dismissed
+  const [, setFirstGone] = useState(0)
   const addShown = useRef(false) // All assets, All versions or the empty project: where a new asset is added from
   const [genPrompt, setGenPrompt] = useState('')
   const [genAspect, setGenAspect] = useState('landscape')
@@ -2246,7 +2252,7 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
     if (!cid) { cid = requestId(); requestIds.current.set(fingerprint, cid) }
     track?.({ cid })
     const body = { client_request_id: cid, confirmed: true, aspect_ratio: spec.aspect, ...(spec.kind === 'revision' ? { parent_id: spec.parentId, brief_id: spec.briefId } : { prompt: spec.prompt }), ...(spec.selection ? { image_selection: spec.selection } : {}) }
-    setGenerating({ kind: spec.kind, parentId: spec.parentId || null })
+    setGenerating({ kind: spec.kind, parentId: spec.parentId || null, cid })
     try {
       let attempt = null
       try {
@@ -2255,10 +2261,10 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
         scope.assert()
         requestIds.current.delete(fingerprint) // durable answer: a deliberate later run gets a new ID
         attempt = result && typeof result === 'object' ? result.attempt : null
-        if (typeof attempt?.id === 'string') track?.({ attemptId: attempt.id })
+        if (typeof attempt?.id === 'string') { track?.({ attemptId: attempt.id }); setGenerating(g => g && { ...g, attemptId: attempt.id }) }
       } catch (e) {
         track?.({ error: `Reservation answer not received. ${text(e)}` })
-        if (current() && projectRef.current === projectId) setMessage({ kind: 'error', head: 'Reservation answer not received. ', text: `${text(e)} Nothing was sent to Hermes. If the reservation was stored it appears below as Reserved; confirming the same inputs again reuses this request ID and cannot reserve twice.` })
+        if (current() && projectRef.current === projectId) setMessage({ kind: 'error', head: 'Reservation answer not received. ', text: `${text(e)} Nothing was sent to Hermes. If the reservation was stored it appears as Reserved with Run / Cancel reservation. Sending the same request again (a revision: from Earlier requests) reuses this request ID and cannot reserve twice.` })
         return
       }
       // The board refresh (thumbnails, media, listings) runs alongside; waiting for it here kept a reservation unsent for seconds.
@@ -2273,7 +2279,7 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
   const sendReserved = async attemptId => {
     if (genLock.current || lock.current || !current() || !pid || !route.ready) return
     genLock.current = true
-    setGenerating({ kind: 'send', parentId: null })
+    setGenerating({ kind: 'send', parentId: null, attemptId })
     try { await sendAttempt(pid, attemptId, identity(), null) } finally { genLock.current = false; if (current()) setGenerating(null) }
   }
   const cancelReserved = async attemptId => {
@@ -2759,7 +2765,7 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
           : el('button', { type: 'button', className: 'rt-new-half', 'data-kind': 'generate', 'aria-label': 'Generate', disabled: genOff, 'aria-describedby': genOff ? 'retake-gen-why' : undefined, onClick: openComposer },
             icon(ICON.spark), 'Generate', genOff ? genWhy() : null)))
   // A reservation this page is sending right now reads "Starting…"; one left reserved reads "Reserved".
-  const waiting = a => a.state === 'reserved' && !generating
+  const waiting = a => a.state === 'reserved' && !sendingNow(a, generating)
   const stateWord = a => waiting(a) ? 'Reserved' : a.state === 'reserved' ? 'Starting…' : 'Generating…'
   const pendingCard = a => el('li', { key: `attempt-${a.id}` }, el('div', { className: 'rt-asset-card', 'data-attempt': a.state, title: `Generation attempt ${a.id}` },
     el('span', { className: 'rt-thumb' }, waiting(a) ? 'Reserved…' : el('span', { className: 'rt-spin', 'aria-hidden': 'true' })),
@@ -2767,13 +2773,13 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
   // A new asset sent from the composer: "Generating…" while its attempt runs; the failure once it settles without one.
   // Its attempt is known by ID once the reservation answers, and by request ID while that answer is pending.
   const runAttempt = r => attempts.find(x => (r.attemptId && x.id === r.attemptId) || (r.cid && x.client_request_id === r.cid)) || null
+  const failText = a => { const msg = a.error?.message ? ` ${String(a.error.message)}` : ''; return a.state === 'unknown' ? `Outcome unknown.${msg}` : a.state === 'reserved' ? 'Reserved · not sent yet.' : `No version created.${msg}` }
   const runState = r => {
     const a = runAttempt(r)
     if (a?.state === 'succeeded') return null
     if (r.error) return { fail: r.error }
     if (!a || a.state === 'running' || (a.state === 'reserved' && generating)) return { fail: '' }
-    const msg = a.error?.message ? ` ${String(a.error.message)}` : ''
-    return { fail: a.state === 'unknown' ? `Outcome unknown.${msg}` : a.state === 'reserved' ? 'Reserved · not sent yet.' : `No version created.${msg}` }
+    return { fail: failText(a) }
   }
   const myRuns = newRuns.filter(r => r.projectId === pid).flatMap(r => { const st = runState(r); return st ? [{ ...r, ...st, attemptId: runAttempt(r)?.id || r.attemptId }] : [] })
   const runCard = r => el('li', { key: `run-${r.key}`, className: 'rt-asset-item' },
@@ -2794,17 +2800,19 @@ function Workspace({ ctx, profile, epoch, connectionId = null }) {
   // opens) or it fails (shown here until dismissed). A reservation nobody is sending keeps the start choices, whose
   // composer lists it with Run / Cancel reservation.
   const firstRun = versions.length ? null : (() => {
-    const r = myRuns[0]
-    if (r) return { key: r.key, title: r.title, fail: r.fail, attemptId: r.attemptId, starting: !r.fail && runAttempt(r)?.state !== 'running' }
-    const a = runningAttempts.find(x => x.kind === 'new_asset' && !waiting(x))
-    return a ? { key: '', title: 'New asset', fail: '', attemptId: a.id, starting: a.state === 'reserved' } : null
+    const live = myRuns.find(r => !r.fail), a = runningAttempts.find(x => x.kind === 'new_asset' && !waiting(x)), failed = myRuns.find(r => r.fail)
+    if (live) return { key: live.key, title: live.title, fail: '', attemptId: live.attemptId, starting: runAttempt(live)?.state !== 'running' }
+    if (a) { firstSeen.current.add(a.id); return { key: '', title: 'New asset', fail: '', attemptId: a.id, starting: a.state === 'reserved' } }
+    if (failed) return { key: failed.key, title: failed.title, fail: failed.fail, attemptId: failed.attemptId, starting: false }
+    const ended = attempts.find(x => firstSeen.current.has(x.id) && (x.state === 'failed' || x.state === 'unknown'))
+    return ended ? { key: '', title: 'New asset', fail: failText(ended), attemptId: ended.id, starting: false } : null
   })()
   const firstRunView = r => emptyMain('first-run', el('div', { className: 'rt-genov-card rt-first-run', 'data-fail': r.fail ? 'true' : undefined },
     r.fail ? el('span', { className: 'rt-run-x', 'aria-hidden': 'true' }, '!') : el('span', { className: 'rt-spin', 'aria-hidden': 'true' }),
     el('p', { className: 'rt-first-title' }, r.title),
     el('p', { role: 'status', className: r.fail ? 'rt-run-fail' : 'rt-muted' }, r.fail || (r.starting ? 'Starting…' : 'Generating…')),
     r.fail ? null : el('span', { className: 'rt-genbar', 'aria-hidden': 'true' }, el('i')),
-    r.fail && r.key ? btn('Dismiss', () => dismissRun(r.key)) : null))
+    r.fail ? btn('Dismiss', () => { if (r.key) dismissRun(r.key); else { firstSeen.current.delete(r.attemptId); setFirstGone(n => n + 1) } }) : null))
   // New-asset runs and attempts started elsewhere wait as cards beside the New asset tile.
   const newRunCards = () => [...myRuns.map(runCard), ...runningAttempts.filter(a => a.kind === 'new_asset' && !tracked.has(a.id)).map(pendingCard)]
   const overview = () => el('section', { key: 'overview', className: 'rt-main rt-overview', 'aria-label': 'Project overview', ...dropZone },
